@@ -7,7 +7,14 @@ from . import metrics
 from .mock_llm import FakeLLM
 from .mock_rag import retrieve
 from .pii import hash_user_id, summarize_text
-from .tracing import langfuse_context, observe
+from .tracing import (
+    generation_observation,
+    observe,
+    trace_attributes,
+    update_current_observation,
+    update_current_trace,
+    update_observation,
+)
 
 
 @dataclass
@@ -25,23 +32,94 @@ class LabAgent:
         self.model = model
         self.llm = FakeLLM(model=model)
 
-    @observe()
-    def run(self, user_id: str, feature: str, session_id: str, message: str) -> AgentResult:
+    def run(
+        self,
+        user_id: str,
+        feature: str,
+        session_id: str,
+        message: str,
+        correlation_id: str | None = None,
+    ) -> AgentResult:
+        with trace_attributes(
+            user_id=hash_user_id(user_id),
+            session_id=session_id,
+            feature=feature,
+            model=self.model,
+            correlation_id=correlation_id,
+        ):
+            return self._run_traced(
+                user_id=user_id,
+                feature=feature,
+                session_id=session_id,
+                message=message,
+                correlation_id=correlation_id,
+            )
+
+    @observe(name="agent-run", capture_input=False, capture_output=False)
+    def _run_traced(
+        self,
+        user_id: str,
+        feature: str,
+        session_id: str,
+        message: str,
+        correlation_id: str | None = None,
+    ) -> AgentResult:
         started = time.perf_counter()
+        user_id_hash = hash_user_id(user_id)
+        message_preview = summarize_text(message, max_len=160)
+
+        update_current_trace(
+            name="chat-response",
+            user_id=user_id_hash,
+            session_id=session_id,
+            tags=["lab", feature, self.model],
+            metadata={
+                "feature": feature,
+                "model": self.model,
+                "correlation_id": correlation_id or "",
+            },
+        )
+
+        update_current_observation(
+            input={"feature": feature, "message_preview": message_preview},
+            metadata={
+                "feature": feature,
+                "model": self.model,
+                "user_id_hash": user_id_hash,
+                "session_id": session_id,
+                "correlation_id": correlation_id or "",
+            },
+        )
+
         docs = retrieve(message)
         prompt = f"Feature={feature}\nDocs={docs}\nQuestion={message}"
-        response = self.llm.generate(prompt)
+
+        with generation_observation(
+            name="fake-llm-generate",
+            model=self.model,
+            input_data={"prompt_preview": summarize_text(prompt, max_len=240)},
+        ) as generation:
+            response = self.llm.generate(prompt)
+            update_observation(
+                generation,
+                output=summarize_text(response.text, max_len=240),
+                usage_details={
+                    "input": response.usage.input_tokens,
+                    "output": response.usage.output_tokens,
+                },
+                metadata={"doc_count": str(len(docs)), "feature": feature},
+            )
+
         quality_score = self._heuristic_quality(message, response.text, docs)
         latency_ms = int((time.perf_counter() - started) * 1000)
         cost_usd = self._estimate_cost(response.usage.input_tokens, response.usage.output_tokens)
 
-        langfuse_context.update_current_trace(
-            user_id=hash_user_id(user_id),
-            session_id=session_id,
-            tags=["lab", feature, self.model],
-        )
-        langfuse_context.update_current_observation(
-            metadata={"doc_count": len(docs), "query_preview": summarize_text(message)},
+        update_current_observation(
+            output={
+                "answer_preview": summarize_text(response.text, max_len=160),
+                "quality_score": quality_score,
+            },
+            metadata={"doc_count": str(len(docs)), "query_preview": message_preview},
             usage_details={"input": response.usage.input_tokens, "output": response.usage.output_tokens},
         )
 

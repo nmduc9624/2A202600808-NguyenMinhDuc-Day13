@@ -2,15 +2,20 @@ from __future__ import annotations
 
 import logging
 import os
+import json
 from pathlib import Path
 from typing import Any
 
 import structlog
+from dotenv import load_dotenv
 from structlog.contextvars import merge_contextvars
 
 from .pii import scrub_text
 
+load_dotenv(override=True)
+
 LOG_PATH = Path(os.getenv("LOG_PATH", "data/logs.jsonl"))
+AUDIT_LOG_PATH = Path(os.getenv("AUDIT_LOG_PATH", "data/audit.jsonl"))
 
 
 class JsonlFileProcessor:
@@ -24,14 +29,35 @@ class JsonlFileProcessor:
 
 
 def scrub_event(_: Any, __: str, event_dict: dict[str, Any]) -> dict[str, Any]:
-    payload = event_dict.get("payload")
-    if isinstance(payload, dict):
-        event_dict["payload"] = {
-            k: scrub_text(v) if isinstance(v, str) else v for k, v in payload.items()
-        }
-    if "event" in event_dict and isinstance(event_dict["event"], str):
-        event_dict["event"] = scrub_text(event_dict["event"])
+    def scrub_value(value: Any) -> Any:
+        if isinstance(value, str):
+            return scrub_text(value)
+        if isinstance(value, dict):
+            return {key: scrub_value(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [scrub_value(item) for item in value]
+        return value
+
+    for key, value in list(event_dict.items()):
+        event_dict[key] = scrub_value(value)
     return event_dict
+
+
+def scrub_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return scrub_text(value)
+    if isinstance(value, dict):
+        return {key: scrub_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [scrub_value(item) for item in value]
+    return value
+
+
+def write_audit_event(event: dict[str, Any]) -> None:
+    AUDIT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    safe_event = scrub_value(event)
+    with AUDIT_LOG_PATH.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(safe_event, ensure_ascii=False, default=str) + "\n")
 
 
 
@@ -42,8 +68,7 @@ def configure_logging() -> None:
             merge_contextvars,
             structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="iso", utc=True, key="ts"),
-            # TODO: Register your PII scrubbing processor here
-            # scrub_event,
+            scrub_event,
             structlog.processors.StackInfoRenderer(),
             structlog.processors.format_exc_info,
             JsonlFileProcessor(),

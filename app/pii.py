@@ -5,17 +5,18 @@ import re
 
 PII_PATTERNS: dict[str, str] = {
     "email": r"[\w\.-]+@[\w\.-]+\.\w+",
-    "phone_vn": r"(?:\+84|0)[ \.-]?\d{3}[ \.-]?\d{3}[ \.-]?\d{3,4}", # Matches 090 123 4567, 090.123.4567, etc.
+    "phone_vn": r"(?:\+84|0)[ \.-]?\d{3}[ \.-]?\d{3}[ \.-]?\d{3,4}",
     "cccd": r"\b\d{12}\b",
     "credit_card": r"\b\d{4}[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b",
-    # TODO: Add more patterns (e.g., Passport, Vietnamese address keywords)
+    "passport": r"\b[A-Z][0-9]{7,8}\b",
+    "address_hint": r"(?i)\b(?:address|dia chi|địa chỉ|street|road|phuong|phường|quan|quận)\b[^,.]{0,80}",
 }
 
 
 def scrub_text(text: str) -> str:
     safe = text
     for name, pattern in PII_PATTERNS.items():
-        safe = re.sub(pattern, f"[REDACTED_{name.upper()}]", safe)
+        safe = re.sub(pattern, f"[REDACTED_{name.upper()}]", safe, flags=re.UNICODE)
     return safe
 
 
